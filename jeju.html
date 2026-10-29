@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>제주 탐사 - three.js</title>
+<style>
+  html,body{margin:0;height:100%;background:#0a1020;overflow:hidden;font-family:"Malgun Gothic","Segoe UI",sans-serif;color:#cfe6ff}
+  canvas{display:block}
+  #hud{position:fixed;left:18px;top:14px;pointer-events:none;text-shadow:0 0 8px #000;max-width:min(420px,70vw)}
+  #hud h1{margin:0 0 6px;font-size:18px;letter-spacing:.08em;font-weight:600;color:#fff}
+  #hud div{font-size:13px;line-height:1.6;opacity:.92}
+  #hud b{color:#7fe0d0;font-weight:600}
+  #info{margin-top:6px;font-size:12.5px;color:#d8ecff;opacity:.9}
+  #help{position:fixed;left:18px;bottom:14px;font-size:12px;opacity:.75;line-height:1.7;text-shadow:0 0 6px #000;pointer-events:none}
+  #help kbd{background:#16324a;border:1px solid #3a6a8a;border-radius:3px;padding:0 5px;margin-right:3px}
+  .lbl{position:fixed;left:0;top:0;font-size:12px;color:#d6f3ff;text-shadow:0 0 5px #000,0 0 3px #000;white-space:nowrap;cursor:pointer;padding:2px 7px;border-radius:3px;background:rgba(10,30,50,.35)}
+  .lbl:hover{background:rgba(40,130,160,.6)}
+  .lbl.on{color:#ffe08a;background:rgba(80,60,10,.5)}
+  #nav{position:fixed;right:16px;top:14px;display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+  #nav a{color:#fff;text-decoration:none;font-size:12px;padding:7px 14px;border-radius:20px;background:rgba(255,255,255,.1);box-shadow:inset 0 0 0 1px rgba(255,255,255,.25)}
+  #nav a:hover{background:rgba(255,255,255,.25)}
+  #load,#err{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;background:#0a1020;color:#8fb8e8;font-size:15px;z-index:9;transition:opacity .8s}
+  #err{display:none}
+</style>
+</head>
+<body>
+<div id="load">제주 DEM으로 지형을 만드는 중…</div>
+<div id="err">three.js를 불러오지 못했습니다. 인터넷 연결을 확인하세요.<br><br><a href="index2.html" style="color:#7fd4ff">index2.html</a></div>
+<div id="hud">
+  <h1>JEJU · 제주 탐사 비행</h1>
+  <div>목표: <b id="tName">-</b></div>
+  <div>거리: <b id="tDist">-</b> &nbsp; 속도: <b id="tSpd">-</b></div>
+  <div>상태: <b id="tState">-</b> &nbsp; 카메라: <b id="tCam">-</b></div>
+  <div id="info"></div>
+</div>
+<div id="nav"><a href="index2.html">◀ 처음(로고)</a><a href="birth.html">🌋 제주도의 탄생</a></div>
+<div id="help">
+  <div><kbd>C</kbd>카메라 전환(추적/자유/섬 전체) <kbd>N</kbd>다음 명소 <kbd>Space</kbd>일시정지 <kbd>+</kbd><kbd>-</kbd>시간 배속</div>
+  <div>마우스 드래그: 시점 회전 &nbsp; 휠: 확대/축소 &nbsp; 명소 이름 클릭: 해당 지점으로 비행</div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="jeju_dem.js"></script>
+<script>
+"use strict";
+if (typeof THREE === "undefined" || !window.JEJU_DEM) {
+  document.getElementById("load").style.display = "none"; document.getElementById("err").style.display = "flex"; throw new Error("load fail");
+}
+const $ = id => document.getElementById(id);
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const mix = (a, b, t) => a + (b - a) * t;
+const sstep = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+
+// ================================================================ 렌더러 / 씬
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.9;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0xdfc3a0, 0.0032);
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.3, 4000);
+
+// ================================================================ 지형 (제주 DEM)
+const D = JEJU_DEM, GW = D.w, GH = D.h;
+const WIDTH = 100, SCALE = WIDTH / D.kmX, DEPTH = D.kmY * SCALE, EX = 2.4;
+const heights = (() => { const bin = atob(D.b64), u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i); return new Uint16Array(u8.buffer); })();
+
+function blur(src, r, w, h) {
+  const tmp = new Float32Array(w * h), out = new Float32Array(w * h), n = 2 * r + 1;
+  for (let y = 0; y < h; y++) { let s = 0; for (let x = -r; x <= r; x++) s += src[y * w + clamp(x, 0, w - 1)]; for (let x = 0; x < w; x++) { tmp[y * w + x] = s / n; s += src[y * w + clamp(x + r + 1, 0, w - 1)] - src[y * w + clamp(x - r, 0, w - 1)]; } }
+  for (let x = 0; x < w; x++) { let s = 0; for (let y = -r; y <= r; y++) s += tmp[clamp(y, 0, h - 1) * w + x]; for (let y = 0; y < h; y++) { out[y * w + x] = s / n; s += tmp[clamp(y + r + 1, 0, h - 1) * w + x] - tmp[clamp(y - r, 0, h - 1) * w + x]; } }
+  return out;
+}
+let mask = new Float32Array(GW * GH); for (let i = 0; i < mask.length; i++) mask[i] = heights[i] > 0 ? 1 : 0;
+for (let k = 0; k < 3; k++) mask = blur(mask, 6, GW, GH);
+
+const hash = (x, y) => { let h = Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263); h = Math.imul(h ^ (h >>> 13), 1274126177); return ((h ^ (h >>> 16)) >>> 0) / 4294967295; };
+const vn = (x, y) => { const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi, u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  return (hash(xi, yi) * (1 - u) + hash(xi + 1, yi) * u) * (1 - v) + (hash(xi, yi + 1) * (1 - u) + hash(xi + 1, yi + 1) * u) * v; };
+const fbm = (x, y) => (vn(x, y) * 0.55 + vn(x * 2.1, y * 2.1) * 0.3 + vn(x * 4.3, y * 4.3) * 0.15);
+
+const geo = new THREE.PlaneGeometry(WIDTH, DEPTH, GW - 1, GH - 1);
+geo.rotateX(-Math.PI / 2);
+const pos = geo.attributes.position, colArr = new Float32Array(pos.count * 3);
+const landY = new Float32Array(GW * GH), hmapBytes = new Uint8Array(GW * GH);
+const HMIN = -5, HRNG = 12;
+let peak = { y: 0, i: 0 };
+for (let i = 0; i < pos.count; i++) {
+  const hm = heights[i], hk = hm / 1000, ix = i % GW, iy = (i / GW) | 0;
+  let y;
+  if (hm > 0) y = hk * SCALE * EX;
+  else { const s = clamp(mask[i] * 2, 0, 1); y = -(0.12 + 2.4 * Math.pow(1 - s, 1.5)); }
+  pos.setY(i, y);
+  landY[i] = Math.max(0, y);
+  if (y > peak.y) peak = { y, i };
+  hmapBytes[i] = clamp(Math.round((y - HMIN) / HRNG * 255), 0, 255);
+  const n = fbm(ix * 0.35, iy * 0.35), n2 = vn(ix * 1.3, iy * 1.3);
+  let c;
+  if (hm <= 0) c = [0.45, 0.42, 0.32];
+  else if (hm < 6) c = [0.74, 0.68, 0.5];
+  else if (hm < 700) { const t = hm / 700; c = [0.17 + 0.08 * t + 0.07 * n, 0.36 - 0.09 * t + 0.06 * n2, 0.1 + 0.03 * n]; }
+  else if (hm < 1500) { const t = (hm - 700) / 800; c = [0.25 + 0.12 * t, 0.27, 0.12 + 0.08 * t].map(v => v * (0.85 + 0.3 * n)); }
+  else { const t = clamp((hm - 1500) / 450, 0, 1); c = [0.36 + 0.1 * t, 0.33 + 0.1 * t, 0.3 + 0.1 * t].map(v => v * (0.85 + 0.3 * n)); }
+  colArr.set(c, i * 3);
+}
+geo.setAttribute("color", new THREE.BufferAttribute(colArr, 3));
+geo.computeVertexNormals();
+const terrain = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, metalness: 0 }));
+scene.add(terrain);
+
+// 월드 좌표 <-> 지형 높이/경위도
+function hAt(x, z) {
+  const u = clamp((x / WIDTH + 0.5) * (GW - 1), 0, GW - 1.001), v = clamp((z / DEPTH + 0.5) * (GH - 1), 0, GH - 1.001);
+  const ix = Math.floor(u), iy = Math.floor(v), fx = u - ix, fy = v - iy, i = iy * GW + ix;
+  return mix(mix(landY[i], landY[i + 1], fx), mix(landY[i + GW], landY[i + GW + 1], fx), fy);
+}
+const lonlat = (lon, lat) => new THREE.Vector3(((lon - 126.10) / 0.9 - 0.5) * WIDTH, 0, ((33.60 - lat) / 0.52 - 0.5) * DEPTH);
+
+// ================================================================ 하늘 / 바다
+const sunDir = new THREE.Vector3(0.3, 0.25, -0.9).normalize();
+const SKY_GLSL = `
+vec3 skyCol(vec3 d, vec3 sun){
+  float h = clamp(d.y, 0.0, 1.0);
+  float warm = smoothstep(0.30, 0.02, sun.y);
+  vec3 hor = mix(vec3(0.80,0.88,0.97), vec3(1.0,0.68,0.42), warm);
+  vec3 zen = mix(vec3(0.16,0.42,0.86), vec3(0.10,0.17,0.40), warm);
+  vec3 c = mix(hor, zen, pow(h, 0.45));
+  float s = max(dot(d, sun), 0.0);
+  c += vec3(1.0,0.55,0.25) * pow(s, 6.0) * 0.45 + vec3(1.0,0.8,0.5) * pow(s, 40.0) * 0.7;
+  c += vec3(1.0,0.95,0.85) * smoothstep(0.99955, 0.99985, s) * 18.0;
+  return c;
+}`;
+const sunU = { value: sunDir };
+scene.add(new THREE.Mesh(new THREE.SphereGeometry(2500, 48, 32), new THREE.ShaderMaterial({
+  side: THREE.BackSide, depthWrite: false, fog: false, uniforms: { sun: sunU },
+  vertexShader: "varying vec3 d;void main(){d=normalize(position);gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}",
+  fragmentShader: `varying vec3 d;uniform vec3 sun;${SKY_GLSL}
+    void main(){vec3 c=skyCol(d,sun);c=c/(1.0+c*0.35);gl_FragColor=vec4(pow(c,vec3(0.4545)),1.);}`,
+})));
+
+const hmapTex = new THREE.DataTexture(hmapBytes, GW, GH, THREE.LuminanceFormat, THREE.UnsignedByteType);
+hmapTex.minFilter = hmapTex.magFilter = THREE.LinearFilter; hmapTex.wrapS = hmapTex.wrapT = THREE.ClampToEdgeWrapping; hmapTex.needsUpdate = true;
+const waterU = { t: { value: 0 }, sun: sunU, hmap: { value: hmapTex }, ext: { value: new THREE.Vector2(WIDTH, DEPTH) } };
+scene.add(new THREE.Mesh(new THREE.PlaneGeometry(5000, 5000, 1, 1).rotateX(-Math.PI / 2), new THREE.ShaderMaterial({
+  uniforms: waterU,
+  vertexShader: "varying vec3 wp;void main(){vec4 w=modelMatrix*vec4(position,1.);wp=w.xyz;gl_Position=projectionMatrix*viewMatrix*w;}",
+  fragmentShader: `varying vec3 wp;uniform float t;uniform vec3 sun;uniform sampler2D hmap;uniform vec2 ext;${SKY_GLSL}
+    vec2 wave(vec2 p,vec2 dir,float k,float slope,float sp,float dist){
+      float w=exp(-dist*k*0.0035);
+      return normalize(dir)*slope*w*cos(dot(normalize(dir),p)*k+t*sp);
+    }
+    void main(){
+      vec3 toCam = cameraPosition - wp; float dist = length(toCam); vec3 V = toCam / dist;
+      vec2 p = wp.xz, g = vec2(0.0);
+      p += vec2(sin(p.y*0.31 + t*0.2) + sin(p.y*1.7 - t*0.4)*0.35, cos(p.x*0.27 - t*0.15) + cos(p.x*1.3 + t*0.3)*0.35) * 1.4;
+      g += wave(p, vec2(1.0,0.3), 1.3, 0.060, 0.9, dist);
+      g += wave(p, vec2(0.6,0.8), 3.7, 0.060, 1.5, dist);
+      g += wave(p, vec2(-0.4,0.9), 9.0, 0.065, 2.3, dist);
+      g += wave(p, vec2(0.9,-0.5), 22.0, 0.055, 3.4, dist);
+      g += wave(p, vec2(0.2,1.0), 51.0, 0.050, 4.6, dist);
+      g += wave(p, vec2(-0.8,0.3), 110.0, 0.045, 6.0, dist);
+      vec3 n = normalize(vec3(-g.x, 1.0, -g.y));
+      vec3 R = reflect(-V, n); R.y = max(R.y, 0.01);
+      float F = 0.02 + 0.98 * pow(1.0 - max(dot(n, V), 0.0), 5.0);
+      vec3 refl = skyCol(normalize(R), sun);
+      vec2 uv = vec2(wp.x / ext.x + 0.5, wp.z / ext.y + 0.5);
+      float inside = step(0.0, uv.x) * step(uv.x, 1.0) * step(0.0, uv.y) * step(uv.y, 1.0);
+      float ty = texture2D(hmap, uv).r * ${HRNG.toFixed(1)} + (${HMIN.toFixed(1)});
+      float depth = mix(8.0, -ty, inside);
+      vec3 deep = vec3(0.012, 0.075, 0.11), shallow = vec3(0.10, 0.50, 0.52);
+      vec3 body = mix(deep, shallow, (1.0 - smoothstep(0.0, 2.4, depth)) * 0.9);
+      body += vec3(0.02,0.07,0.06) * pow(1.0 - max(dot(n,V),0.0), 2.0);
+      vec3 col = mix(body, refl, F);
+      float spec = pow(max(dot(R, sun), 0.0), 900.0) * 60.0 + pow(max(dot(R, sun), 0.0), 120.0) * 1.6;
+      col += vec3(1.0,0.82,0.58) * spec * clamp(F * 3.0 + 0.1, 0.0, 1.0);
+      float foam = (1.0 - smoothstep(0.0, 0.55 + 0.15 * sin(t + p.x * 3.0), depth)) * step(0.0, depth) * inside;
+      foam *= 0.55 + 0.45 * sin(depth * 22.0 - t * 1.8 + p.x * 2.0);
+      col = mix(col, vec3(0.95,0.97,1.0), clamp(foam, 0.0, 1.0) * 0.85);
+      float f = 1.0 - exp(-dist * 0.0007);
+      col = mix(col, skyCol(normalize(vec3(-V.x, 0.02, -V.z)), sun), f);
+      col = col / (1.0 + col * 0.35);
+      gl_FragColor = vec4(pow(col, vec3(0.4545)), 1.0);
+    }`,
+})));
+
+const sunLight = new THREE.DirectionalLight(0xffe2c0, 2.6); scene.add(sunLight);
+scene.add(new THREE.HemisphereLight(0xa8c4ff, 0x4a3a30, 0.6));
+
+// ================================================================ 명소
+const glowTex = (() => { const c = document.createElement("canvas"); c.width = c.height = 64; const g = c.getContext("2d"), gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  gr.addColorStop(0, "rgba(255,255,255,1)"); gr.addColorStop(.3, "rgba(255,255,255,.4)"); gr.addColorStop(1, "rgba(255,255,255,0)"); g.fillStyle = gr; g.fillRect(0, 0, 64, 64); return new THREE.CanvasTexture(c); })();
+const SPOTS = [
+  { kr: "한라산", lon: 126.533, lat: 33.362, r: 15, alt: 9, info: "해발 1,947m, 대한민국 최고봉. 제주 화산섬의 중심이자 정상에 백록담 화구호가 있다." },
+  { kr: "성산일출봉", lon: 126.941, lat: 33.455, r: 8, alt: 7, info: "바다 속 화산 분출로 생긴 응회구. 일출 명소로 유명하다." },
+  { kr: "우도", lon: 126.951, lat: 33.502, r: 8, alt: 7, info: "성산 앞바다의 부속 섬. 소가 누운 모양이라 이름이 붙었다." },
+  { kr: "제주시", lon: 126.531, lat: 33.499, r: 9, alt: 8, info: "섬 북쪽 해안의 중심 도시. 공항과 항구가 있다." },
+  { kr: "협재해변", lon: 126.239, lat: 33.394, r: 8, alt: 7, info: "에메랄드빛 얕은 바다와 하얀 모래, 멀리 비양도가 보인다." },
+  { kr: "산방산", lon: 126.314, lat: 33.239, r: 8, alt: 7, info: "종 모양 용암돔(해발 약 395m). 남서쪽 해안에 우뚝 서 있다." },
+  { kr: "마라도", lon: 126.267, lat: 33.114, r: 7, alt: 7, info: "국토 최남단의 작은 섬." },
+  { kr: "서귀포", lon: 126.56, lat: 33.25, r: 9, alt: 8, info: "섬 남쪽 해안 도시. 정방·천지연 폭포가 가깝다." },
+];
+const ORDER = [0, 1, 2, 3, 4, 5, 6, 7];
+SPOTS.forEach((s, i) => {
+  s.pos = lonlat(s.lon, s.lat); s.pos.y = hAt(s.pos.x, s.pos.z);
+  const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 8, 8, 1, true),
+    new THREE.MeshBasicMaterial({ color: 0xffb04a, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false, fog: false }));
+  beam.position.set(s.pos.x, s.pos.y + 4, s.pos.z); scene.add(beam);
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: 0xffc070, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false, fog: false }));
+  sp.scale.set(3.2, 3.2, 1); sp.position.set(s.pos.x, s.pos.y + 8.2, s.pos.z); scene.add(sp);
+  s.top = new THREE.Vector3(s.pos.x, s.pos.y + 9.2, s.pos.z);
+  const el = document.createElement("div"); el.className = "lbl"; el.textContent = s.kr; el.onclick = () => goTo(i);
+  document.body.appendChild(el); s.el = el;
+});
+
+// ================================================================ 비행체 (헬리콥터) + 키프레임 클립
+const heli = new THREE.Group();
+const body = new THREE.Group(); body.name = "body"; heli.add(body);
+{
+  const hull = new THREE.MeshStandardMaterial({ color: 0xf2f4f8, metalness: 0.4, roughness: 0.35 });
+  const red = new THREE.MeshStandardMaterial({ color: 0xe8483a, metalness: 0.3, roughness: 0.45 });
+  const dark = new THREE.MeshStandardMaterial({ color: 0x252b36, metalness: 0.5, roughness: 0.5 });
+  const cabin = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 14), hull); cabin.scale.set(1.0, 0.85, 1.7); body.add(cabin);
+  const glass = new THREE.Mesh(new THREE.SphereGeometry(0.8, 18, 12, 0, Math.PI * 2, 0, Math.PI * 0.55),
+    new THREE.MeshStandardMaterial({ color: 0x66ccff, emissive: 0x0b2a44, metalness: 0.9, roughness: 0.08 }));
+  glass.scale.set(1, 0.9, 1.1); glass.position.set(0, 0.28, 0.95); glass.rotation.x = 0.5; body.add(glass);
+  const boom = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.34, 3.2, 12), red); boom.rotation.x = Math.PI / 2; boom.position.z = -2.6; body.add(boom);
+  const fin = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.9, 0.7), red); fin.position.set(0, 0.45, -4.0); body.add(fin);
+  const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.12, 0.5, 8), dark); mast.position.y = 0.95; body.add(mast);
+  const rotor = new THREE.Group(); rotor.name = "rotor"; rotor.position.y = 1.22; body.add(rotor);
+  for (let k = 0; k < 2; k++) { const b = new THREE.Mesh(new THREE.BoxGeometry(5.6, 0.04, 0.26), dark); b.rotation.y = k * Math.PI / 2; rotor.add(b); }
+  const disc = new THREE.Mesh(new THREE.CircleGeometry(2.8, 32), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.08, side: THREE.DoubleSide, depthWrite: false }));
+  disc.rotation.x = -Math.PI / 2; rotor.add(disc);
+  const tail = new THREE.Group(); tail.name = "tail"; tail.position.set(0.18, 0.45, -4.0); body.add(tail);
+  const tb = new THREE.Mesh(new THREE.BoxGeometry(0.04, 1.1, 0.14), dark); tail.add(tb);
+  for (const sx of [-1, 1]) {
+    const skid = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 2.6, 8), dark); skid.rotation.x = Math.PI / 2; skid.position.set(sx * 0.7, -0.95, 0.1); body.add(skid);
+    for (const z of [-0.5, 0.7]) { const l = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.55, 6), dark); l.position.set(sx * 0.7, -0.68, z); body.add(l); }
+  }
+  const nav = new THREE.Mesh(new THREE.SphereGeometry(0.08, 8, 8), new THREE.MeshBasicMaterial({ color: 0xff3030 })); nav.position.set(0, 0.98, -4.0); body.add(nav);
+}
+heli.scale.setScalar(1.2);
+scene.add(heli);
+
+const TWO_PI = Math.PI * 2;
+const flyClip = new THREE.AnimationClip("fly", 1, [
+  new THREE.NumberKeyframeTrack("rotor.rotation[y]", [0, 0.12, 0.24], [0, Math.PI, TWO_PI], THREE.InterpolateLinear),
+  new THREE.NumberKeyframeTrack("tail.rotation[x]", [0, 0.06, 0.12], [0, Math.PI, TWO_PI], THREE.InterpolateLinear),
+  new THREE.NumberKeyframeTrack("body.position[y]", [0, 0.5, 1], [0, 0.12, 0], THREE.InterpolateSmooth),
+]);
+const heliMixer = new THREE.AnimationMixer(heli);
+heliMixer.clipAction(flyClip).play();
+
+// 하루의 흐름: 태양 고도 키프레임 (30초 왕복)
+const rig = new THREE.Object3D(), driver = new THREE.Object3D(); driver.name = "driver"; rig.add(driver);
+const dayClip = new THREE.AnimationClip("day", 40, [
+  new THREE.VectorKeyframeTrack("driver.position", [0, 20, 40], [0, 0, 0.14, 0, 0, 0.55, 0, 0, 0.14], THREE.InterpolateSmooth),
+]);
+const dayMixer = new THREE.AnimationMixer(rig);
+dayMixer.clipAction(dayClip).play();
+function setSun(e) {
+  const az = 0.32;
+  sunDir.set(Math.sin(az) * Math.cos(e), Math.sin(e), -Math.cos(az) * Math.cos(e)).normalize();
+  sunLight.position.copy(sunDir).multiplyScalar(300);
+  sunLight.intensity = 1.0 + 2.2 * clamp(Math.sin(e) * 3, 0, 1);
+  const k = sstep(0.1, 0.45, e);
+  scene.fog.color.setRGB(mix(0.9, 0.72, k), mix(0.62, 0.84, k), mix(0.42, 0.95, k));
+}
+
+// ================================================================ 비행 상태기계 (space.html과 동일 구조)
+let tIdx = 0, target = ORDER[0], state = "travel", orbitT = 0;
+const orbitOff = new THREE.Vector3(), vel = new THREE.Vector3(0, 0, -1);
+const goalFor = s => new THREE.Vector3(s.pos.x, s.pos.y + s.alt, s.pos.z);
+function goTo(i) { tIdx = ORDER.indexOf(i); target = i; state = "travel"; }
+function nextTarget() { tIdx = (tIdx + 1) % ORDER.length; target = ORDER[tIdx]; state = "travel"; }
+heli.position.copy(lonlat(126.35, 33.58)); heli.position.y = 22;
+
+const A = new THREE.Vector3(), B = new THREE.Vector3(), C = new THREE.Vector3();
+let paused = false, timeScale = 1, simT = 0, bank = 0;
+const prevFwd = new THREE.Vector3(0, 0, -1), dummy = new THREE.Object3D(), tmpQ = new THREE.Quaternion();
+
+function terrainClear(p, fwd) {                      // 지형 회피: 앞쪽 지형 높이를 미리 보고 최소 고도 계산
+  let need = hAt(p.x, p.z);
+  for (const d of [6, 14, 24]) need = Math.max(need, hAt(p.x + fwd.x * d, p.z + fwd.z * d) - d * 0.06);
+  return need + 4.5;
+}
+function updateShip(dt) {
+  const s = SPOTS[target], prev = A.copy(heli.position);
+  const fwd = B.copy(vel); if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1); fwd.normalize();
+  if (state === "travel") {
+    const goal = goalFor(s), to = goal.clone().sub(heli.position), dist = to.length();
+    const speed = Math.min(dist > 60 ? 26 : 16, 2 + dist * 0.8);
+    const desired = to.normalize().multiplyScalar(speed);
+    const minY = terrainClear(heli.position, fwd);
+    if (heli.position.y < minY) desired.y += (minY - heli.position.y) * 3;
+    vel.lerp(desired, 1 - Math.exp(-dt * 1.4));
+    heli.position.addScaledVector(vel, dt);
+    const hd = Math.hypot(heli.position.x - goal.x, heli.position.z - goal.z);
+    if (dist < s.r + 6 || (hd < s.r + 5 && vel.length() < 10)) { state = "orbit"; orbitT = 0; orbitOff.copy(heli.position).sub(s.pos); orbitOff.y = 0; if (orbitOff.lengthSq() < 1) orbitOff.set(1, 0, 0); }
+  } else {
+    orbitT += dt;
+    orbitOff.setLength(mix(orbitOff.length(), s.r, 1 - Math.exp(-dt * 1.2)));
+    orbitOff.applyAxisAngle(C.set(0, 1, 0), (0.5 * 9 / s.r) * dt * 0.7);
+    const px = s.pos.x + orbitOff.x, pz = s.pos.z + orbitOff.z;
+    const wantY = Math.max(s.pos.y + s.alt, terrainClear(heli.position, fwd));
+    heli.position.set(px, mix(heli.position.y, wantY, 1 - Math.exp(-dt * 2)), pz);
+    vel.copy(heli.position).sub(prev).divideScalar(Math.max(dt, 1e-4));
+    if (orbitT > 10) nextTarget();
+  }
+  // 자세 (+Z가 기수)
+  const f = B.copy(vel); if (f.lengthSq() < 1e-6) f.set(0, 0, -1);
+  const fh = new THREE.Vector3(f.x, f.y * 0.4, f.z).normalize();
+  dummy.position.copy(heli.position); dummy.lookAt(heli.position.clone().add(fh)); tmpQ.copy(dummy.quaternion);
+  heli.quaternion.slerp(tmpQ, 1 - Math.exp(-dt * 4));
+  const turn = prevFwd.clone().cross(fh).y / Math.max(dt, 1e-4);
+  bank += (clamp(-turn * 1.2, -0.5, 0.5) - bank) * (1 - Math.exp(-dt * 3));
+  body.rotation.z = bank; prevFwd.copy(fh);
+}
+
+// ================================================================ 입력 / 카메라
+let camMode = 0; const CAM_NAMES = ["추적", "자유", "섬 전체"];
+const view = [{ th: 0, ph: 0.35, d: 30 }, { th: 0.6, ph: 0.35, d: 24 }, { th: 0.3, ph: 0.62, d: 120 }];
+let dragging = false, lx = 0, ly = 0;
+addEventListener("pointerdown", e => { dragging = true; lx = e.clientX; ly = e.clientY; });
+addEventListener("pointerup", () => dragging = false);
+addEventListener("pointermove", e => {
+  if (!dragging) return;
+  const v = view[camMode]; v.th -= (e.clientX - lx) * 0.005; v.ph = clamp(v.ph + (e.clientY - ly) * 0.005, -1.0, 1.45);
+  lx = e.clientX; ly = e.clientY;
+});
+addEventListener("wheel", e => { const v = view[camMode]; v.d = clamp(v.d * (1 + Math.sign(e.deltaY) * 0.1), camMode === 2 ? 40 : 6, camMode === 2 ? 300 : 120); }, { passive: true });
+addEventListener("keydown", e => {
+  const k = e.key.toLowerCase();
+  if (k === "c") camMode = (camMode + 1) % 3;
+  else if (k === "n") nextTarget();
+  else if (k === " ") { paused = !paused; e.preventDefault(); }
+  else if (k === "+" || k === "=") timeScale = Math.min(6, timeScale * 1.5);
+  else if (k === "-") timeScale = Math.max(0.25, timeScale / 1.5);
+});
+addEventListener("resize", () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+const camPos = new THREE.Vector3(), camLook = new THREE.Vector3(), look = new THREE.Vector3();
+function updateCamera(dt) {
+  const v = view[camMode];
+  if (camMode === 0) {
+    const fwd = B.copy(vel).setY(0).normalize(); if (!isFinite(fwd.x) || fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1);
+    const side = new THREE.Vector3().crossVectors(fwd, new THREE.Vector3(0, 1, 0)).normalize();
+    camPos.copy(heli.position).addScaledVector(fwd, -Math.cos(v.ph) * v.d).addScaledVector(side, Math.sin(v.th) * v.d * 0.7);
+    camPos.y = heli.position.y + Math.sin(v.ph) * v.d + 2;
+    camLook.copy(heli.position).addScaledVector(fwd, 8);
+    camera.position.lerp(camPos, 1 - Math.exp(-dt * 3.5));
+    look.lerp(camLook, 1 - Math.exp(-dt * 5));
+  } else {
+    const c = camMode === 1 ? heli.position : C.set(0, 0, 0);
+    const off = new THREE.Vector3(Math.sin(v.th) * Math.cos(v.ph), Math.sin(v.ph), Math.cos(v.th) * Math.cos(v.ph)).multiplyScalar(v.d);
+    camPos.copy(c).add(off);
+    camera.position.lerp(camPos, 1 - Math.exp(-dt * 6));
+    look.lerp(c, 1 - Math.exp(-dt * 6));
+  }
+  camera.position.y = Math.max(camera.position.y, hAt(camera.position.x, camera.position.z) + 2, 1.5);
+  camera.lookAt(look);
+}
+
+const proj = new THREE.Vector3();
+function updateLabels() {
+  SPOTS.forEach((s, i) => {
+    proj.copy(s.top).project(camera);
+    const vis = proj.z < 1 && Math.abs(proj.x) < 1.1 && Math.abs(proj.y) < 1.1;
+    s.el.style.display = vis ? "block" : "none";
+    if (vis) s.el.style.transform = `translate(${(proj.x * 0.5 + 0.5) * innerWidth}px,${(-proj.y * 0.5 + 0.5) * innerHeight}px) translate(-50%,-100%)`;
+    s.el.classList.toggle("on", i === target);
+  });
+}
+
+// ================================================================ 루프
+const clock = new THREE.Clock();
+const hud = { n: $("tName"), d: $("tDist"), s: $("tSpd"), st: $("tState"), c: $("tCam"), i: $("info") };
+look.copy(heli.position); camera.position.copy(heli.position).add(new THREE.Vector3(0, 8, 16));
+function loop() {
+  requestAnimationFrame(loop);
+  let dt = Math.min(clock.getDelta(), 0.05);
+  if (!paused) {
+    dt *= timeScale; simT += dt;
+    waterU.t.value = simT;
+    heliMixer.update(dt * 2); dayMixer.update(dt);
+    setSun(driver.position.z);
+    updateShip(dt);
+  }
+  updateCamera(0.016);
+  updateLabels();
+  const s = SPOTS[target], dist = heli.position.distanceTo(s.pos) / SCALE;
+  hud.n.textContent = s.kr; hud.d.textContent = dist.toFixed(1) + " km"; hud.s.textContent = (vel.length() / SCALE * 3.6 * 20).toFixed(0) + " km/h";
+  hud.st.textContent = state === "travel" ? "비행 중" : "선회 관람 중";
+  hud.c.textContent = CAM_NAMES[camMode] + (paused ? " · 일시정지" : "") + (timeScale !== 1 ? ` · x${timeScale.toFixed(2)}` : "");
+  hud.i.textContent = s.info;
+  renderer.render(scene, camera);
+}
+setSun(0.14);
+loop();
+$("load").style.opacity = 0; setTimeout(() => $("load").remove(), 900);
+</script>
+</body>
+</html>

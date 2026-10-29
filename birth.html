@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>제주도의 탄생 · three.js</title>
+<style>
+  html,body{margin:0;height:100%;background:#0a1020;overflow:hidden;font-family:"Malgun Gothic","Segoe UI",sans-serif;color:#e6f0ff}
+  canvas{display:block}
+  #cap{position:fixed;left:0;right:0;bottom:24vh;text-align:center;pointer-events:none}
+  #cap div{position:absolute;left:0;right:0;font-size:clamp(16px,2.2vw,26px);line-height:1.6;letter-spacing:.04em;opacity:0;transition:opacity 1s;text-shadow:0 0 14px #000,0 0 4px #000}
+  #cap div.on{opacity:1}
+  #cap #title{font-size:clamp(32px,6vw,72px);font-weight:800;letter-spacing:.12em;bottom:0}
+  #ui{position:fixed;left:0;right:0;bottom:6vh;display:flex;flex-direction:column;align-items:center;gap:12px;pointer-events:none}
+  #sub{font-size:13px;letter-spacing:.35em;color:#a8c6f0;opacity:0;transition:opacity 1.4s;text-shadow:0 0 12px #3a7bff}
+  .row{display:flex;gap:12px;flex-wrap:wrap;justify-content:center}
+  .btn{pointer-events:auto;text-decoration:none;color:#fff;font-size:15px;letter-spacing:.1em;padding:12px 28px;border-radius:40px;opacity:0;transform:translateY(14px);
+       transition:opacity 1s,transform 1s,box-shadow .25s,filter .25s;border:0;cursor:pointer;font-family:inherit}
+  .btn.show{opacity:1;transform:none}
+  #go{background:linear-gradient(90deg,#2b7bff,#b23cff);box-shadow:0 0 28px rgba(80,120,255,.55)}
+  #go:hover{box-shadow:0 0 46px rgba(150,110,255,.9);filter:brightness(1.15)}
+  .ghost{background:rgba(255,255,255,.08);box-shadow:inset 0 0 0 1px rgba(255,255,255,.28)}
+  .ghost:hover{background:rgba(255,255,255,.2)}
+  #bar{position:fixed;left:0;right:0;top:0;height:3px;background:rgba(255,255,255,.12)}
+  #bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,#35d0ff,#ff7a3a)}
+  #hud{position:fixed;left:16px;top:14px;font-size:12px;opacity:.75;line-height:1.7;pointer-events:none;text-shadow:0 0 8px #000}
+  #mt{position:fixed;left:0;top:0;font-size:12px;color:#fff;text-shadow:0 0 6px #000,0 0 3px #000;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity 1s}
+  #load,#err{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;background:#0a1020;color:#8fb8e8;font-size:15px;z-index:9;transition:opacity .8s}
+  #err{display:none}
+</style>
+</head>
+<body>
+<div id="load">제주 DEM으로 지형을 만드는 중…</div>
+<div id="err">three.js를 불러오지 못했습니다. 인터넷 연결을 확인하세요.<br><br><a href="index.html" style="color:#7fd4ff">index.html</a></div>
+<div id="bar"><i id="barf"></i></div>
+<div id="hud">제주도 DEM(SRTM 30m) 기반 · 드래그: 회전 / 휠: 확대 / 우클릭 드래그: 이동</div>
+<div id="mt">한라산 1,947m</div>
+<div id="cap">
+  <div id="c1">약 180만 년 전<br>얕은 바다 밑에서 화산이 깨어나다</div>
+  <div id="c2">끓어오르는 용암과 화산재가<br>바다 위로 솟구치다</div>
+  <div id="c3">분출이 거듭되며 한라산을 중심으로<br>화산섬이 자라나다</div>
+  <div id="c4">식어 굳은 용암 위에<br>푸른 생명이 깃들다</div>
+  <div id="title">제주도의 탄생</div>
+</div>
+<div id="ui">
+  <div id="sub">THREE.JS · KEYFRAME ANIMATION · JEJU DEM</div>
+  <div class="row">
+    <a id="go" class="btn" href="jeju.html">🚁 제주 탐사 실행 (jeju.html)</a>
+    <a class="btn ghost" id="home" href="index2.html">◀ 처음으로 (index2.html)</a>
+    <button class="btn ghost" id="replay">↻ 탄생 다시 보기</button>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="jeju_dem.js"></script>
+<script>
+"use strict";
+if (typeof THREE === "undefined" || !THREE.OrbitControls || !window.JEJU_DEM) {
+  document.getElementById("load").style.display = "none"; document.getElementById("err").style.display = "flex"; throw new Error("load fail");
+}
+const $ = id => document.getElementById(id);
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const sstep = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+
+// ================================================================ 렌더러 / 씬
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.9;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0xe9b98c, 0.0034);
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.5, 4000);
+camera.position.set(-70, 16, 96);
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 1.5, 0);
+controls.enableDamping = true; controls.dampingFactor = 0.06;
+controls.maxPolarAngle = Math.PI * 0.495; controls.minDistance = 10; controls.maxDistance = 260;
+controls.update();
+let intro = true; controls.addEventListener("start", () => intro = false);
+
+// ================================================================ 지형 (DEM)
+const D = JEJU_DEM, GW = D.w, GH = D.h;
+const WIDTH = 100, SCALE = WIDTH / D.kmX, DEPTH = D.kmY * SCALE, EX = 2.4;
+const heights = (() => { const bin = atob(D.b64), u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i); return new Uint16Array(u8.buffer); })();
+
+// 육지 마스크를 흐려 해안에서 멀수록 깊어지는 해저를 만든다
+function blur(src, r, w, h) {
+  const tmp = new Float32Array(w * h), out = new Float32Array(w * h), n = 2 * r + 1;
+  for (let y = 0; y < h; y++) { let s = 0; for (let x = -r; x <= r; x++) s += src[y * w + clamp(x, 0, w - 1)]; for (let x = 0; x < w; x++) { tmp[y * w + x] = s / n; s += src[y * w + clamp(x + r + 1, 0, w - 1)] - src[y * w + clamp(x - r, 0, w - 1)]; } }
+  for (let x = 0; x < w; x++) { let s = 0; for (let y = -r; y <= r; y++) s += tmp[clamp(y, 0, h - 1) * w + x]; for (let y = 0; y < h; y++) { out[y * w + x] = s / n; s += tmp[clamp(y + r + 1, 0, h - 1) * w + x] - tmp[clamp(y - r, 0, h - 1) * w + x]; } }
+  return out;
+}
+let mask = new Float32Array(GW * GH); for (let i = 0; i < mask.length; i++) mask[i] = heights[i] > 0 ? 1 : 0;
+for (let k = 0; k < 3; k++) mask = blur(mask, 6, GW, GH);
+
+const geo = new THREE.PlaneGeometry(WIDTH, DEPTH, GW - 1, GH - 1);
+geo.rotateX(-Math.PI / 2);
+const pos = geo.attributes.position, colArr = new Float32Array(pos.count * 3), hotArr = new Float32Array(pos.count);
+const hmapBytes = new Uint8Array(GW * GH);
+const HMIN = -5, HRNG = 12;
+let peak = { y: 0, i: 0 };
+
+// 값 노이즈 (용암 무늬 / 색 변화)
+const hash = (x, y) => { let h = Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263); h = Math.imul(h ^ (h >>> 13), 1274126177); return ((h ^ (h >>> 16)) >>> 0) / 4294967295; };
+const vn = (x, y) => { const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi, u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  return (hash(xi, yi) * (1 - u) + hash(xi + 1, yi) * u) * (1 - v) + (hash(xi, yi + 1) * (1 - u) + hash(xi + 1, yi + 1) * u) * v; };
+const fbm = (x, y) => (vn(x, y) * 0.55 + vn(x * 2.1, y * 2.1) * 0.3 + vn(x * 4.3, y * 4.3) * 0.15);
+
+for (let i = 0; i < pos.count; i++) {
+  const hm = heights[i], hk = hm / 1000, ix = i % GW, iy = (i / GW) | 0;
+  let y;
+  if (hm > 0) y = hk * SCALE * EX;
+  else { const s = clamp(mask[i] * 2, 0, 1); y = -(0.12 + 2.4 * Math.pow(1 - s, 1.5)); }
+  pos.setY(i, y);
+  if (y > peak.y) peak = { y, i };
+  hmapBytes[i] = clamp(Math.round((y - HMIN) / HRNG * 255), 0, 255);
+  const n = fbm(ix * 0.35, iy * 0.35), n2 = vn(ix * 1.3, iy * 1.3);
+  let c;
+  if (hm <= 0) c = [0.45, 0.42, 0.32];
+  else if (hm < 6) c = [0.74, 0.68, 0.5];
+  else if (hm < 700) { const t = hm / 700; c = [0.17 + 0.08 * t + 0.07 * n, 0.36 - 0.09 * t + 0.06 * n2, 0.1 + 0.03 * n]; }
+  else if (hm < 1500) { const t = (hm - 700) / 800; c = [0.25 + 0.12 * t, 0.27 + 0.0 * t, 0.12 + 0.08 * t].map((v, k) => v * (0.85 + 0.3 * n)); }
+  else { const t = clamp((hm - 1500) / 450, 0, 1); c = [0.36 + 0.1 * t, 0.33 + 0.1 * t, 0.3 + 0.1 * t].map(v => v * (0.85 + 0.3 * n)); }
+  colArr.set(c, i * 3);
+  hotArr[i] = fbm(ix * 0.5 + 40, iy * 0.5 + 9) * 0.75 - clamp(hk / 1.95, 0, 1) * 0.28;
+}
+geo.setAttribute("color", new THREE.BufferAttribute(colArr, 3));
+geo.setAttribute("aHot", new THREE.BufferAttribute(hotArr, 1));
+geo.computeVertexNormals();
+
+const uCool = { value: 0 };
+const terrainMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, metalness: 0 });
+terrainMat.onBeforeCompile = sh => {
+  sh.uniforms.uCool = uCool;
+  sh.vertexShader = sh.vertexShader.replace("#include <common>", "#include <common>\nattribute float aHot;varying float vHot;")
+    .replace("#include <begin_vertex>", "#include <begin_vertex>\nvHot=aHot;");
+  sh.fragmentShader = sh.fragmentShader.replace("#include <common>", "#include <common>\nuniform float uCool;varying float vHot;")
+    .replace("#include <emissivemap_fragment>", `#include <emissivemap_fragment>
+      float hot = 1.0 - smoothstep(0.30, 0.38, vHot + uCool * 0.85);
+      vec3 cooled = mix(vec3(0.11,0.10,0.095), diffuseColor.rgb, smoothstep(0.55, 1.0, uCool));
+      diffuseColor.rgb = mix(cooled, vec3(0.02), hot);
+      totalEmissiveRadiance += vec3(1.0,0.28,0.04) * hot * (0.55 + 0.3*sin(vHot*60.0 + uCool*10.0));`);
+};
+const terrain = new THREE.Mesh(geo, terrainMat);
+terrain.name = "terrain";
+terrain.position.y = -9;
+
+const rig = new THREE.Group(); rig.add(terrain);
+const driver = new THREE.Object3D(); driver.name = "driver"; rig.add(driver);
+scene.add(rig);
+
+// 정점 좌표(월드 xz)로 한라산 꼭대기 위치
+const ventLocal = new THREE.Vector3(pos.getX(peak.i), peak.y, pos.getZ(peak.i));
+
+// ================================================================ 하늘 / 바다 셰이더
+const sunDir = new THREE.Vector3(0.3, 0.1, -0.9).normalize();
+const SKY_GLSL = `
+vec3 skyCol(vec3 d, vec3 sun){
+  float h = clamp(d.y, 0.0, 1.0);
+  float warm = smoothstep(0.30, 0.02, sun.y);
+  vec3 hor = mix(vec3(0.80,0.86,0.95), vec3(1.0,0.68,0.42), warm);
+  vec3 zen = mix(vec3(0.20,0.42,0.80), vec3(0.10,0.17,0.40), warm);
+  vec3 c = mix(hor, zen, pow(h, 0.45));
+  float s = max(dot(d, sun), 0.0);
+  c += vec3(1.0,0.55,0.25) * pow(s, 6.0) * 0.55 + vec3(1.0,0.8,0.5) * pow(s, 40.0) * 0.8;
+  c += vec3(1.0,0.95,0.85) * smoothstep(0.99955, 0.99985, s) * 18.0;
+  return c;
+}`;
+const sunU = { value: sunDir };
+const sky = new THREE.Mesh(new THREE.SphereGeometry(2500, 48, 32), new THREE.ShaderMaterial({
+  side: THREE.BackSide, depthWrite: false, fog: false, uniforms: { sun: sunU },
+  vertexShader: "varying vec3 d;void main(){d=normalize(position);gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}",
+  fragmentShader: `varying vec3 d;uniform vec3 sun;${SKY_GLSL}
+    void main(){vec3 c=skyCol(d,sun);c=c/(1.0+c*0.35);gl_FragColor=vec4(pow(c,vec3(0.4545)),1.);}`,
+}));
+scene.add(sky);
+
+const hmapTex = new THREE.DataTexture(hmapBytes, GW, GH, THREE.LuminanceFormat, THREE.UnsignedByteType);
+hmapTex.minFilter = hmapTex.magFilter = THREE.LinearFilter; hmapTex.wrapS = hmapTex.wrapT = THREE.ClampToEdgeWrapping; hmapTex.needsUpdate = true;
+const waterU = { t: { value: 0 }, sun: sunU, hmap: { value: hmapTex }, uOff: { value: -9 }, ext: { value: new THREE.Vector2(WIDTH, DEPTH) } };
+const water = new THREE.Mesh(new THREE.PlaneGeometry(5000, 5000, 1, 1).rotateX(-Math.PI / 2), new THREE.ShaderMaterial({
+  uniforms: waterU, depthWrite: true,
+  vertexShader: "varying vec3 wp;void main(){vec4 w=modelMatrix*vec4(position,1.);wp=w.xyz;gl_Position=projectionMatrix*viewMatrix*w;}",
+  fragmentShader: `varying vec3 wp;uniform float t;uniform vec3 sun;uniform sampler2D hmap;uniform float uOff;uniform vec2 ext;${SKY_GLSL}
+    vec2 wave(vec2 p,vec2 dir,float k,float slope,float sp,float dist){
+      float w=exp(-dist*k*0.0035);
+      return normalize(dir)*slope*w*cos(dot(normalize(dir),p)*k+t*sp);
+    }
+    void main(){
+      vec3 toCam = cameraPosition - wp; float dist = length(toCam); vec3 V = toCam / dist;
+      vec2 p = wp.xz, g = vec2(0.0);
+      p += vec2(sin(p.y*0.31 + t*0.2) + sin(p.y*1.7 - t*0.4)*0.35, cos(p.x*0.27 - t*0.15) + cos(p.x*1.3 + t*0.3)*0.35) * 1.4;
+      g += wave(p, vec2(1.0,0.3), 1.3, 0.060, 0.9, dist);
+      g += wave(p, vec2(0.6,0.8), 3.7, 0.060, 1.5, dist);
+      g += wave(p, vec2(-0.4,0.9), 9.0, 0.065, 2.3, dist);
+      g += wave(p, vec2(0.9,-0.5), 22.0, 0.055, 3.4, dist);
+      g += wave(p, vec2(0.2,1.0), 51.0, 0.050, 4.6, dist);
+      g += wave(p, vec2(-0.8,0.3), 110.0, 0.045, 6.0, dist);
+      vec3 n = normalize(vec3(-g.x, 1.0, -g.y));
+      vec3 R = reflect(-V, n); R.y = max(R.y, 0.01);
+      float F = 0.02 + 0.98 * pow(1.0 - max(dot(n, V), 0.0), 5.0);
+      vec3 refl = skyCol(normalize(R), sun);
+      // 해저 지형 -> 수심 / 거품
+      vec2 uv = vec2(wp.x / ext.x + 0.5, wp.z / ext.y + 0.5);
+      float inside = step(0.0, uv.x) * step(uv.x, 1.0) * step(0.0, uv.y) * step(uv.y, 1.0);
+      float ty = texture2D(hmap, uv).r * ${HRNG.toFixed(1)} + (${HMIN.toFixed(1)}) + uOff;
+      float depth = mix(8.0, -ty, inside);
+      vec3 deep = vec3(0.012, 0.075, 0.11);
+      vec3 shallow = vec3(0.10, 0.50, 0.52);
+      vec3 body = mix(deep, shallow, (1.0 - smoothstep(0.0, 2.4, depth)) * 0.9);
+      body += vec3(0.02,0.07,0.06) * pow(1.0 - max(dot(n,V),0.0), 2.0);
+      vec3 col = mix(body, refl, F);
+      float spec = pow(max(dot(R, sun), 0.0), 900.0) * 60.0 + pow(max(dot(R, sun), 0.0), 120.0) * 1.6;
+      col += vec3(1.0,0.82,0.58) * spec * clamp(F * 3.0 + 0.1, 0.0, 1.0);
+      float foam = (1.0 - smoothstep(0.0, 0.55 + 0.15 * sin(t + p.x * 3.0), depth)) * step(0.0, depth) * inside;
+      foam *= 0.55 + 0.45 * sin(depth * 22.0 - t * 1.8 + p.x * 2.0);
+      col = mix(col, vec3(0.95,0.97,1.0), clamp(foam, 0.0, 1.0) * 0.85);
+      // 원경 안개
+      float f = 1.0 - exp(-dist * 0.0007);
+      col = mix(col, skyCol(normalize(vec3(-V.x, 0.02, -V.z)), sun), f);
+      col = col / (1.0 + col * 0.35);
+      gl_FragColor = vec4(pow(col, vec3(0.4545)), 1.0);
+    }`,
+}));
+scene.add(water);
+
+// 조명
+const sunLight = new THREE.DirectionalLight(0xffd9b0, 2.6); scene.add(sunLight);
+const hemi = new THREE.HemisphereLight(0xa8c4ff, 0x4a3a30, 0.55); scene.add(hemi);
+const lavaLight = new THREE.PointLight(0xff5a1a, 0, 60, 2); scene.add(lavaLight);
+
+// ================================================================ 화산재 기둥
+const smokeTex = (() => { const c = document.createElement("canvas"); c.width = c.height = 64; const g = c.getContext("2d");
+  const gr = g.createRadialGradient(32, 32, 2, 32, 32, 32); gr.addColorStop(0, "rgba(255,255,255,.9)"); gr.addColorStop(.5, "rgba(255,255,255,.45)"); gr.addColorStop(1, "rgba(255,255,255,0)");
+  g.fillStyle = gr; g.fillRect(0, 0, 64, 64); return new THREE.CanvasTexture(c); })();
+const puffs = [];
+for (let i = 0; i < 90; i++) {
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: smokeTex, transparent: true, depthWrite: false, opacity: 0, fog: false }));
+  s.userData = { age: Math.random() * 6, life: 5 + Math.random() * 3, dx: (Math.random() - .5) * 1.4, dz: (Math.random() - .5) * 1.4, v: 3.5 + Math.random() * 3 };
+  scene.add(s); puffs.push(s);
+}
+const hotC = new THREE.Color(1.0, 0.45, 0.15), ashC = new THREE.Color(0.32, 0.28, 0.27), tmpC = new THREE.Color();
+function updatePuffs(dt, amt, vent) {
+  puffs.forEach(s => {
+    const u = s.userData; u.age += dt;
+    if (u.age > u.life) { u.age = 0; u.life = 5 + Math.random() * 3; u.v = 3.5 + Math.random() * 3; if (Math.random() > amt) { s.material.opacity = 0; u.age = u.life - 0.01; return; } }
+    const k = u.age / u.life;
+    s.position.set(vent.x + u.dx * k * 10 + k * 7, vent.y + 1 + k * u.v * 6, vent.z + u.dz * k * 10);
+    const sz = 3 + k * 20; s.scale.set(sz, sz, 1);
+    tmpC.copy(hotC).lerp(ashC, sstep(0.0, 0.35, k)); s.material.color.copy(tmpC);
+    s.material.opacity = Math.min(1, k * 8) * (1 - k) * 0.6 * amt;
+  });
+}
+
+// ================================================================ 키프레임 애니메이션 (AnimationMixer)
+const DUR = 15;
+const clip = new THREE.AnimationClip("birth", DUR, [
+  // 지형이 바다 밑에서 솟아오름 (선형 키프레임을 촘촘히 → 부드러운 가감속)
+  new THREE.VectorKeyframeTrack("terrain.position", [0, 1.5, 4, 6, 8, 10, 12, 13.5, 15],
+    [0,-9,0, 0,-8.6,0, 0,-7.0,0, 0,-5.0,0, 0,-3.4,0, 0,-2.0,0, 0,-0.9,0, 0,-0.25,0, 0,0,0], THREE.InterpolateLinear),
+  // x: 용암 냉각, y: 화산재 분출량, z: 태양 고도(rad)
+  new THREE.VectorKeyframeTrack("driver.position", [0, 2, 5, 9, 13, 15],
+    [0,0,0.07,  0,0.3,0.09,  0.05,1,0.13,  0.4,0.9,0.17,  0.95,0.15,0.21,  1,0,0.24], THREE.InterpolateSmooth),
+]);
+const mixer = new THREE.AnimationMixer(rig);
+const action = mixer.clipAction(clip);
+action.setLoop(THREE.LoopOnce); action.clampWhenFinished = true; action.play();
+
+// ?t=초 : 해당 시점으로 이동해 정지 (확인용)
+const seek = new URLSearchParams(location.search).get("t");
+if (seek !== null) { action.time = parseFloat(seek); action.paused = true; intro = false; camera.position.set(8, 30, 110); controls.target.set(0, 2, -2); }
+// 자막 타임라인
+const CAPS = [["c1", 0.4, 3.0], ["c2", 3.4, 6.4], ["c3", 6.8, 9.8], ["c4", 10.2, 12.8], ["title", 13.2, 1e9]];
+let shownUI = false;
+function replay() { action.reset().play(); intro = true; shownUI = false; ["go", "home", "replay"].forEach(i => $(i).classList.remove("show")); $("sub").style.opacity = 0; }
+$("replay").onclick = replay;
+
+// ================================================================ 루프
+const clock = new THREE.Clock(), vent = new THREE.Vector3(), proj = new THREE.Vector3();
+const startPos = new THREE.Vector3(-70, 16, 96), endPos = new THREE.Vector3(12, 40, 118);
+function setSun(e) {
+  const az = 0.32;
+  sunDir.set(Math.sin(az) * Math.cos(e), Math.sin(e), -Math.cos(az) * Math.cos(e)).normalize();
+  sunLight.position.copy(sunDir).multiplyScalar(300);
+  sunLight.intensity = 1.2 + 2.4 * clamp(Math.sin(e) * 4, 0, 1);
+}
+function frame() {
+  requestAnimationFrame(frame);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  mixer.update(dt);
+  const t = action.time;
+
+  const cool = driver.position.x, plume = driver.position.y, elev = driver.position.z;
+  uCool.value = cool; setSun(elev);
+  waterU.t.value += dt; waterU.uOff.value = terrain.position.y;
+  scene.fog.color.setRGB(0.9, 0.62 + 0.2 * (1 - sstep(0.07, 0.24, elev)) * 0 + 0.12 * sstep(0.07, 0.24, elev), 0.42 + 0.3 * sstep(0.07, 0.24, elev));
+
+  vent.copy(ventLocal); vent.y += terrain.position.y;
+  const ventY = Math.max(vent.y, 0.3);
+  updatePuffs(dt, plume, new THREE.Vector3(vent.x, ventY, vent.z));
+  lavaLight.position.set(vent.x, ventY + 2, vent.z);
+  lavaLight.intensity = (1 - cool) * plume * 120;
+
+  if (intro) { const k = sstep(0, 12, t); camera.position.lerpVectors(startPos, endPos, k); controls.target.set(0, 1.5 + 2 * k, -2 * k); }
+  controls.update();
+
+  // 자막
+  CAPS.forEach(([id, a, b]) => $(id).classList.toggle("on", t >= a && t < b));
+  $("barf").style.width = (clamp(t / DUR, 0, 1) * 100) + "%";
+  if (!shownUI && t > 13.5) { shownUI = true; $("sub").style.opacity = 1; ["go", "home", "replay"].forEach(i => $(i).classList.add("show")); }
+  // 한라산 라벨
+  proj.copy(vent).project(camera); proj.y += 0;
+  const mt = $("mt"), vis = proj.z < 1 && vent.y > 1.5 && t > 6;
+  mt.style.opacity = vis ? 1 : 0; mt.style.transform = `translate(${(proj.x * .5 + .5) * innerWidth}px,${(-proj.y * .5 + .5) * innerHeight - 26}px) translate(-50%,-100%)`;
+
+  renderer.render(scene, camera);
+}
+addEventListener("resize", () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+frame();
+$("load").style.opacity = 0; setTimeout(() => $("load").remove(), 900);
+</script>
+</body>
+</html>
