@@ -1,0 +1,7 @@
+frames/
+*.blend
+*.blend1
+dem_dl/
+render.log
+test_*.png
+.claude/

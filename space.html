@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>우주 탐사 - three.js</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:"Malgun Gothic","Segoe UI",sans-serif;color:#cfe6ff}
+  canvas{display:block}
+  #hud{position:fixed;left:18px;top:14px;pointer-events:none;text-shadow:0 0 8px #000}
+  #hud h1{margin:0 0 6px;font-size:18px;letter-spacing:.08em;font-weight:600;color:#fff}
+  #hud div{font-size:13px;line-height:1.6;opacity:.9}
+  #hud b{color:#7fd4ff;font-weight:600}
+  #help{position:fixed;left:18px;bottom:14px;font-size:12px;opacity:.7;line-height:1.7;text-shadow:0 0 6px #000;pointer-events:none}
+  #help kbd{background:#1a2a44;border:1px solid #35507a;border-radius:3px;padding:0 5px;margin-right:3px}
+  .lbl{position:fixed;left:0;top:0;font-size:12px;color:#bfe3ff;text-shadow:0 0 5px #000,0 0 3px #000;white-space:nowrap;cursor:pointer;transform:translate(-50%,-100%);padding:2px 6px;border-radius:3px}
+  .lbl:hover{background:rgba(60,110,180,.45)}
+  .lbl.on{color:#ffe08a}
+  #load{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#000;color:#8fb8e8;font-size:15px;z-index:9;transition:opacity .8s}
+</style>
+</head>
+<body>
+<div id="load">우주를 생성하는 중…</div>
+<div id="hud">
+  <h1>SOLAR SYSTEM · 우주선 탐사</h1>
+  <div>목표: <b id="tName">-</b></div>
+  <div>거리: <b id="tDist">-</b> &nbsp; 속도: <b id="tSpd">-</b></div>
+  <div>상태: <b id="tState">-</b> &nbsp; 카메라: <b id="tCam">-</b></div>
+</div>
+<div id="help">
+  <div><kbd>C</kbd>카메라 전환(추적/자유/태양계 전체) <kbd>N</kbd>다음 행성 <kbd>Space</kbd>일시정지 <kbd>+</kbd><kbd>-</kbd>시간 배속</div>
+  <div>마우스 드래그: 시점 회전 &nbsp; 휠: 확대/축소 &nbsp; 행성 이름 클릭: 해당 행성으로 비행</div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+"use strict";
+// ================================================================ 유틸: 노이즈
+function hash3(x, y, z, s) {
+  let h = Math.imul(x, 374761393) ^ Math.imul(y, 668265263) ^ Math.imul(z, 1274126177) ^ Math.imul(s, 2246822519);
+  h = Math.imul(h ^ (h >>> 13), 1274126177); h ^= h >>> 16;
+  return (h >>> 0) / 4294967295;
+}
+function vnoise(x, y, z, s) {
+  const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+  const xf = x - xi, yf = y - yi, zf = z - zi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf), w = zf * zf * (3 - 2 * zf);
+  const L = (a, b, t) => a + (b - a) * t;
+  return L(
+    L(L(hash3(xi, yi, zi, s), hash3(xi + 1, yi, zi, s), u), L(hash3(xi, yi + 1, zi, s), hash3(xi + 1, yi + 1, zi, s), u), v),
+    L(L(hash3(xi, yi, zi + 1, s), hash3(xi + 1, yi, zi + 1, s), u), L(hash3(xi, yi + 1, zi + 1, s), hash3(xi + 1, yi + 1, zi + 1, s), u), v), w);
+}
+function fbm(x, y, z, s, oct) {
+  let a = 0.5, f = 1, sum = 0, norm = 0;
+  for (let i = 0; i < oct; i++) { sum += a * vnoise(x * f, y * f, z * f, s + i * 17); norm += a; f *= 2; a *= 0.5; }
+  return sum / norm;
+}
+const mix = (a, b, t) => a + (b - a) * t;
+const mixC = (c1, c2, t) => [mix(c1[0], c2[0], t), mix(c1[1], c2[1], t), mix(c1[2], c2[2], t)];
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const sstep = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+
+// 구면 위 절차적 텍스처 (경도/위도 -> 3D 노이즈로 이음매 없음)
+function sphereTexture(fn, w = 512, h = 256, alpha = false) {
+  const c = document.createElement("canvas"); c.width = w; c.height = h;
+  const g = c.getContext("2d"), img = g.createImageData(w, h);
+  for (let py = 0; py < h; py++) {
+    const lat = (0.5 - (py + 0.5) / h) * Math.PI;
+    for (let px = 0; px < w; px++) {
+      const lon = ((px + 0.5) / w) * Math.PI * 2;
+      const x = Math.cos(lat) * Math.cos(lon), y = Math.sin(lat), z = Math.cos(lat) * Math.sin(lon);
+      const col = fn(x, y, z, lat);
+      const i = (py * w + px) * 4;
+      img.data[i] = col[0] * 255; img.data[i + 1] = col[1] * 255; img.data[i + 2] = col[2] * 255;
+      img.data[i + 3] = alpha ? col[3] * 255 : 255;
+    }
+  }
+  g.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(c);
+  t.anisotropy = 4;
+  return t;
+}
+
+const TEX = {
+  mercury: () => sphereTexture((x, y, z) => {
+    const n = fbm(x * 5, y * 5, z * 5, 1, 6), cr = fbm(x * 14, y * 14, z * 14, 9, 3);
+    const v = 0.28 + 0.45 * n - 0.15 * sstep(0.62, 0.7, cr);
+    return [v, v * 0.96, v * 0.92];
+  }),
+  venus: () => sphereTexture((x, y, z) => {
+    const wx = fbm(x * 2, y * 2, z * 2, 3, 3) * 2;
+    const n = fbm(x * 2.5 + wx, y * 6 + wx, z * 2.5, 5, 5);
+    return mixC([0.78, 0.55, 0.25], [0.97, 0.88, 0.62], n);
+  }),
+  earth: () => sphereTexture((x, y, z, lat) => {
+    const e = fbm(x * 2.2, y * 2.2, z * 2.2, 21, 6);
+    const ice = sstep(1.05, 1.3, Math.abs(lat));
+    if (e < 0.5) {
+      const d = sstep(0.28, 0.5, e);
+      return mixC([0.02, 0.07, 0.24], [0.08, 0.32, 0.55], d);
+    }
+    const m = fbm(x * 6, y * 6, z * 6, 4, 4), h = sstep(0.5, 0.75, e);
+    let c = mixC([0.12, 0.38, 0.12], [0.55, 0.45, 0.25], clamp(h * 1.2 + (m - 0.5), 0, 1));
+    c = mixC(c, [0.95, 0.95, 0.97], clamp(sstep(0.68, 0.85, e) * 0.6, 0, 1));
+    if (Math.abs(lat) < 0.5 && m < 0.4) c = mixC(c, [0.76, 0.66, 0.4], 0.5);
+    return mixC(c, [0.96, 0.97, 1.0], ice);
+  }, 1024, 512),
+  clouds: () => sphereTexture((x, y, z) => {
+    const w = fbm(x * 2, y * 3, z * 2, 31, 3) * 1.5;
+    const n = fbm(x * 3 + w, y * 5 + w, z * 3, 33, 5);
+    const a = sstep(0.48, 0.72, n);
+    return [1, 1, 1, a * 0.85];
+  }, 512, 256, true),
+  moon: () => sphereTexture((x, y, z) => {
+    const n = fbm(x * 4, y * 4, z * 4, 41, 5), m = fbm(x * 2, y * 2, z * 2, 43, 3);
+    const v = 0.4 + 0.35 * n - 0.18 * sstep(0.55, 0.65, m);
+    return [v, v, v * 0.97];
+  }),
+  mars: () => sphereTexture((x, y, z, lat) => {
+    const n = fbm(x * 3, y * 3, z * 3, 51, 6), d = fbm(x * 8, y * 8, z * 8, 53, 3);
+    let c = mixC([0.45, 0.17, 0.08], [0.82, 0.42, 0.2], n);
+    c = mixC(c, [0.25, 0.1, 0.06], sstep(0.5, 0.7, d) * 0.5);
+    return mixC(c, [0.95, 0.93, 0.92], sstep(1.2, 1.4, Math.abs(lat)));
+  }),
+  jupiter: () => sphereTexture((x, y, z, lat) => {
+    const warp = fbm(x * 3, y * 8, z * 3, 61, 4);
+    const b = Math.sin(lat * 15 + warp * 5) * 0.5 + 0.5;
+    const turb = fbm(x * 9, y * 22, z * 9, 63, 4);
+    let c = mixC([0.62, 0.42, 0.28], [0.95, 0.87, 0.74], b);
+    c = mixC(c, [0.55, 0.3, 0.2], sstep(0.55, 0.8, turb) * 0.6);
+    // 대적점
+    const dx = Math.atan2(z, x) - 2.3, dy = lat + 0.35;
+    const spot = Math.exp(-(dx * dx * 22 + dy * dy * 90));
+    return mixC(c, [0.75, 0.25, 0.15], clamp(spot * 1.2, 0, 1));
+  }),
+  saturn: () => sphereTexture((x, y, z, lat) => {
+    const warp = fbm(x * 2, y * 6, z * 2, 71, 3);
+    const b = Math.sin(lat * 20 + warp * 3) * 0.5 + 0.5;
+    return mixC([0.74, 0.62, 0.42], [0.93, 0.84, 0.62], b);
+  }),
+  uranus: () => sphereTexture((x, y, z, lat) => {
+    const b = Math.sin(lat * 8) * 0.5 + 0.5, n = fbm(x * 3, y * 3, z * 3, 81, 3);
+    return mixC([0.5, 0.82, 0.86], [0.66, 0.92, 0.94], b * 0.6 + n * 0.4);
+  }),
+  neptune: () => sphereTexture((x, y, z, lat) => {
+    const w = fbm(x * 3, y * 6, z * 3, 91, 4);
+    const b = Math.sin(lat * 12 + w * 4) * 0.5 + 0.5;
+    let c = mixC([0.1, 0.2, 0.7], [0.25, 0.42, 0.95], b);
+    const spot = Math.exp(-(Math.pow(Math.atan2(z, x) - 1, 2) * 30 + Math.pow(lat + 0.3, 2) * 120));
+    return mixC(c, [0.04, 0.08, 0.4], spot);
+  }),
+};
+
+function glowTexture(inner = "rgba(255,255,255,1)", mid = "rgba(255,255,255,0.25)") {
+  const c = document.createElement("canvas"); c.width = c.height = 128;
+  const g = c.getContext("2d"), gr = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  gr.addColorStop(0, inner); gr.addColorStop(0.25, mid); gr.addColorStop(1, "rgba(0,0,0,0)");
+  g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
+  return new THREE.CanvasTexture(c);
+}
+function glowSprite(color, scale, opacity = 1, tex) {
+  const m = new THREE.SpriteMaterial({ map: tex || glowTexture(), color, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity });
+  const s = new THREE.Sprite(m); s.scale.set(scale, scale, 1); return s;
+}
+
+// ================================================================ 기본 설정
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 8000);
+camera.position.set(0, 20, 120);
+
+scene.add(new THREE.AmbientLight(0x6070a0, 0.22));
+const sunLight = new THREE.PointLight(0xfff0d8, 1.9, 0, 0);
+scene.add(sunLight);
+
+// ================================================================ 배경: 별 + 성운
+{
+  const N = 9000, pos = new Float32Array(N * 3), col = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) {
+    const u = Math.random() * 2 - 1, t = Math.random() * Math.PI * 2, r = 2500 + Math.random() * 500, s = Math.sqrt(1 - u * u);
+    pos.set([r * s * Math.cos(t), r * u, r * s * Math.sin(t)], i * 3);
+    const k = Math.random(), c = k < 0.2 ? [1, 0.75, 0.6] : k < 0.5 ? [0.7, 0.8, 1] : [1, 1, 1], b = 0.35 + Math.random() * 0.65;
+    col.set([c[0] * b, c[1] * b, c[2] * b], i * 3);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  g.setAttribute("color", new THREE.BufferAttribute(col, 3));
+  scene.add(new THREE.Points(g, new THREE.PointsMaterial({ size: 1.8, sizeAttenuation: false, vertexColors: true, transparent: true, depthWrite: false })));
+
+  const glsl = `
+    float h(vec3 p){p=fract(p*0.3183099+.1);p*=17.0;return fract(p.x*p.y*p.z*(p.x+p.y+p.z));}
+    float n(vec3 x){vec3 i=floor(x),f=fract(x);f=f*f*(3.-2.*f);
+      return mix(mix(mix(h(i),h(i+vec3(1,0,0)),f.x),mix(h(i+vec3(0,1,0)),h(i+vec3(1,1,0)),f.x),f.y),
+                 mix(mix(h(i+vec3(0,0,1)),h(i+vec3(1,0,1)),f.x),mix(h(i+vec3(0,1,1)),h(i+vec3(1,1,1)),f.x),f.y),f.z);}
+    float fbm(vec3 p){float a=.5,s=0.;for(int i=0;i<5;i++){s+=a*n(p);p*=2.02;a*=.5;}return s;}`;
+  scene.add(new THREE.Mesh(new THREE.SphereGeometry(3200, 48, 32), new THREE.ShaderMaterial({
+    side: THREE.BackSide, depthWrite: false, fog: false,
+    vertexShader: "varying vec3 d;void main(){d=position;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}",
+    fragmentShader: `varying vec3 d;${glsl}
+      void main(){vec3 p=normalize(d)*2.2;float a=fbm(p+3.),b=fbm(p*1.7-7.),m=smoothstep(.45,.85,a);
+        vec3 c=mix(vec3(.02,.02,.08),vec3(.35,.12,.45),m)+vec3(.05,.25,.5)*smoothstep(.5,.9,b)*.7;
+        float band=exp(-pow(normalize(d).y*3.,2.));c*=.35+band*.9;gl_FragColor=vec4(c*.55,1.);}`,
+  })));
+}
+
+// ================================================================ 태양
+const sunMat = new THREE.ShaderMaterial({
+  uniforms: { t: { value: 0 } },
+  vertexShader: "varying vec3 p;varying vec3 nn;varying vec3 vv;void main(){p=position;nn=normalize(normalMatrix*normal);vec4 mv=modelViewMatrix*vec4(position,1.);vv=normalize(-mv.xyz);gl_Position=projectionMatrix*mv;}",
+  fragmentShader: `varying vec3 p;varying vec3 nn;varying vec3 vv;uniform float t;
+    float h(vec3 p){p=fract(p*0.3183099+.1);p*=17.0;return fract(p.x*p.y*p.z*(p.x+p.y+p.z));}
+    float n(vec3 x){vec3 i=floor(x),f=fract(x);f=f*f*(3.-2.*f);
+      return mix(mix(mix(h(i),h(i+vec3(1,0,0)),f.x),mix(h(i+vec3(0,1,0)),h(i+vec3(1,1,0)),f.x),f.y),
+                 mix(mix(h(i+vec3(0,0,1)),h(i+vec3(1,0,1)),f.x),mix(h(i+vec3(0,1,1)),h(i+vec3(1,1,1)),f.x),f.y),f.z);}
+    float fbm(vec3 q){float a=.5,s=0.;for(int i=0;i<6;i++){s+=a*n(q);q*=2.03;a*=.5;}return s;}
+    void main(){vec3 q=p*.35;float f=fbm(q+vec3(0.,t*.15,0.)+fbm(q*2.-t*.1)*1.2);
+      vec3 c=mix(vec3(.9,.25,.02),vec3(1.,.85,.35),smoothstep(.3,.8,f));
+      c+=vec3(1.,.9,.6)*pow(f,4.)*1.5;float r=pow(1.-max(dot(nn,vv),0.),2.);c+=vec3(1.,.4,.1)*r*.9;
+      gl_FragColor=vec4(c*1.25,1.);}`,
+});
+const SUN_R = 10;
+const sun = new THREE.Mesh(new THREE.SphereGeometry(SUN_R, 64, 48), sunMat);
+scene.add(sun);
+sun.add(glowSprite(0xffa840, SUN_R * 7, 0.85));
+sun.add(glowSprite(0xff6a20, SUN_R * 14, 0.35));
+
+// ================================================================ 행성
+const DEFS = [
+  { id: "mercury", kr: "수성", r: 30, R: 1.4, spin: 0.2, tilt: 0.0 },
+  { id: "venus", kr: "금성", r: 44, R: 2.2, spin: -0.1, tilt: 3.1, atmo: 0xffcc88 },
+  { id: "earth", kr: "지구", r: 60, R: 2.4, spin: 0.6, tilt: 0.41, atmo: 0x4a9bff },
+  { id: "mars", kr: "화성", r: 76, R: 1.8, spin: 0.55, tilt: 0.44, atmo: 0xff8855 },
+  { id: "jupiter", kr: "목성", r: 112, R: 7, spin: 1.2, tilt: 0.05 },
+  { id: "saturn", kr: "토성", r: 150, R: 6, spin: 1.0, tilt: 0.47 },
+  { id: "uranus", kr: "천왕성", r: 186, R: 3.8, spin: -0.7, tilt: 1.7, atmo: 0x88e8ff },
+  { id: "neptune", kr: "해왕성", r: 216, R: 3.6, spin: 0.7, tilt: 0.5, atmo: 0x3a66ff },
+];
+const atmoMat = color => new THREE.ShaderMaterial({
+  uniforms: { c: { value: new THREE.Color(color) } },
+  vertexShader: "varying vec3 n;void main(){n=normalize(normalMatrix*normal);gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}",
+  fragmentShader: "varying vec3 n;uniform vec3 c;void main(){float i=pow(max(0.72-dot(n,vec3(0.,0.,1.)),0.),3.5)*2.2;gl_FragColor=vec4(c,1.)*i;}",
+  side: THREE.BackSide, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false,
+});
+
+const planets = [];
+const planetGroup = new THREE.Group(); scene.add(planetGroup);
+DEFS.forEach((d, i) => {
+  const grp = new THREE.Group();
+  const tiltG = new THREE.Group(); tiltG.rotation.z = d.tilt; grp.add(tiltG);
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(d.R, 64, 48),
+    new THREE.MeshStandardMaterial({ map: TEX[d.id](), roughness: 0.92, metalness: 0 }));
+  tiltG.add(mesh);
+  if (d.atmo) tiltG.add(new THREE.Mesh(new THREE.SphereGeometry(d.R * 1.14, 48, 32), atmoMat(d.atmo)));
+  const p = { ...d, grp, mesh, tiltG, angle: Math.random() * Math.PI * 2, w: 0.1 * Math.pow(30 / d.r, 1.5) };
+  if (d.id === "earth") {
+    p.clouds = new THREE.Mesh(new THREE.SphereGeometry(d.R * 1.012, 64, 48),
+      new THREE.MeshStandardMaterial({ map: TEX.clouds(), transparent: true, depthWrite: false, roughness: 1 }));
+    tiltG.add(p.clouds);
+    p.moon = new THREE.Mesh(new THREE.SphereGeometry(0.66, 32, 24), new THREE.MeshStandardMaterial({ map: TEX.moon(), roughness: 1 }));
+    grp.add(p.moon); p.moonA = 0;
+  }
+  if (d.id === "saturn") {
+    const inner = d.R * 1.35, outer = d.R * 2.4;
+    const rg = new THREE.RingGeometry(inner, outer, 160, 4);
+    const uv = rg.attributes.uv, ps = rg.attributes.position;
+    for (let k = 0; k < ps.count; k++) uv.setXY(k, (Math.hypot(ps.getX(k), ps.getY(k)) - inner) / (outer - inner), 0.5);
+    const c = document.createElement("canvas"); c.width = 512; c.height = 4;
+    const g = c.getContext("2d"), im = g.createImageData(512, 1);
+    for (let x = 0; x < 512; x++) {
+      const t = x / 511, b = fbm(t * 40, 0.5, 0.5, 7, 4);
+      let a = 0.15 + 0.85 * sstep(0.3, 0.7, b);
+      if (t > 0.62 && t < 0.68) a *= 0.08;           // 카시니 틈
+      if (t < 0.08) a *= t / 0.08;
+      a *= 1 - sstep(0.93, 1, t);
+      const v = 0.6 + 0.4 * b;
+      im.data.set([235 * v, 215 * v, 175 * v, 255 * a], x * 4);
+    }
+    g.putImageData(im, 0, 0); g.drawImage(c, 0, 0, 512, 1, 0, 1, 512, 3);
+    const ring = new THREE.Mesh(rg, new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c), side: THREE.DoubleSide, transparent: true, depthWrite: false }));
+    ring.rotation.x = -Math.PI / 2;
+    // 본체 그림자 흉내: 약간 어둡게
+    ring.material.color.setScalar(0.85);
+    tiltG.add(ring);
+  }
+  // 궤도선
+  const pts = []; for (let k = 0; k <= 256; k++) { const a = k / 256 * Math.PI * 2; pts.push(new THREE.Vector3(Math.cos(a) * d.r, 0, Math.sin(a) * d.r)); }
+  scene.add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: 0x4a6fa8, transparent: true, opacity: 0.22 })));
+  planetGroup.add(grp);
+  // 라벨
+  const el = document.createElement("div"); el.className = "lbl"; el.textContent = d.kr;
+  el.onclick = () => goTo(i);
+  document.body.appendChild(el); p.el = el;
+  p.pos = new THREE.Vector3();
+  planets.push(p);
+});
+const earth = planets[2];
+
+// 소행성대
+{
+  const N = 1800, inst = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(0.22, 0), new THREE.MeshStandardMaterial({ color: 0x8a7e72, roughness: 1, flatShading: true }), N);
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler();
+  for (let i = 0; i < N; i++) {
+    const a = Math.random() * Math.PI * 2, r = 90 + Math.random() * 14 + (Math.random() - 0.5) * 4, y = (Math.random() - 0.5) * 3.2;
+    e.set(Math.random() * 6, Math.random() * 6, Math.random() * 6); q.setFromEuler(e);
+    const s = 0.4 + Math.random() * 1.6;
+    m.compose(new THREE.Vector3(Math.cos(a) * r, y, Math.sin(a) * r), q, new THREE.Vector3(s, s * (0.6 + Math.random() * 0.6), s));
+    inst.setMatrixAt(i, m);
+  }
+  var belt = inst; scene.add(belt);
+}
+
+// ================================================================ 우주선
+const ship = new THREE.Group();
+const shipBody = new THREE.Group(); ship.add(shipBody);   // 롤(기울기)용
+{
+  const hull = new THREE.MeshStandardMaterial({ color: 0xcfd6e2, metalness: 0.75, roughness: 0.3 });
+  const dark = new THREE.MeshStandardMaterial({ color: 0x2b3345, metalness: 0.6, roughness: 0.45 });
+  const accent = new THREE.MeshStandardMaterial({ color: 0xff5a3c, metalness: 0.4, roughness: 0.4 });
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.6, 2.2, 16), hull); body.rotation.x = Math.PI / 2; shipBody.add(body);
+  const nose = new THREE.Mesh(new THREE.ConeGeometry(0.45, 1.6, 16), hull); nose.rotation.x = Math.PI / 2; nose.position.z = 1.9; shipBody.add(nose);
+  const cock = new THREE.Mesh(new THREE.SphereGeometry(0.34, 16, 12), new THREE.MeshStandardMaterial({ color: 0x66ccff, emissive: 0x114466, metalness: 0.9, roughness: 0.1 }));
+  cock.scale.set(1, 0.8, 1.7); cock.position.set(0, 0.42, 0.7); shipBody.add(cock);
+  for (const sx of [-1, 1]) {
+    const wing = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.07, 1.5), dark);
+    wing.position.set(sx * 1.25, -0.05, -0.35); wing.rotation.z = sx * -0.12; wing.rotation.y = sx * 0.35; shipBody.add(wing);
+    const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.09, 1.1), accent); stripe.position.set(sx * 1.85, -0.07, -0.3); stripe.rotation.copy(wing.rotation); shipBody.add(stripe);
+    const eng = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.28, 1.2, 12), dark); eng.rotation.x = Math.PI / 2; eng.position.set(sx * 0.62, 0, -1.3); shipBody.add(eng);
+    const fin = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.8, 0.9), hull); fin.position.set(sx * 0.35, 0.5, -1.2); shipBody.add(fin);
+  }
+}
+const engineGlows = [];
+for (const sx of [-1, 1]) {
+  const g = glowSprite(0x66ccff, 2.2, 1); g.position.set(sx * 0.62, 0, -1.95); shipBody.add(g); engineGlows.push(g);
+}
+const engineLight = new THREE.PointLight(0x66ccff, 1.2, 14, 2); engineLight.position.set(0, 0, -2.4); ship.add(engineLight);
+ship.scale.setScalar(1.1);
+scene.add(ship);
+
+// 항적
+const TRAIL = 220, trailPos = new Float32Array(TRAIL * 3), trailCol = new Float32Array(TRAIL * 3);
+for (let i = 0; i < TRAIL; i++) { const k = Math.pow(1 - i / TRAIL, 2); trailCol.set([0.3 * k, 0.75 * k, 1.0 * k], i * 3); }
+const trailGeo = new THREE.BufferGeometry();
+trailGeo.setAttribute("position", new THREE.BufferAttribute(trailPos, 3));
+trailGeo.setAttribute("color", new THREE.BufferAttribute(trailCol, 3));
+const trail = new THREE.Points(trailGeo, new THREE.PointsMaterial({ size: 2.6, sizeAttenuation: false, vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
+trail.frustumCulled = false; scene.add(trail);
+
+// ---- 비행 상태기계: 이동(travel) → 궤도 선회(orbit) → 다음 행성
+const ORDER = [2, 3, 4, 5, 6, 7, 1, 0];
+let tIdx = 0, state = "travel", orbitT = 0, orbitOff = new THREE.Vector3(), orbitAxis = new THREE.Vector3(0.28, 1, 0.18).normalize();
+const vel = new THREE.Vector3(0, 0, 1);
+const tmpA = new THREE.Vector3(), tmpB = new THREE.Vector3(), tmpC = new THREE.Vector3();
+let target = ORDER[tIdx];
+function goTo(i) { const k = ORDER.indexOf(i); tIdx = k; target = i; state = "travel"; }
+function nextTarget() { tIdx = (tIdx + 1) % ORDER.length; target = ORDER[tIdx]; state = "travel"; }
+const orbitRadius = p => p.R * 2.7 + 5;
+
+// 초기 위치: 지구 근처
+ship.position.set(earth.r + 12, 3, 8);
+
+// ================================================================ 입력 / 카메라
+let camMode = 0; const CAM_NAMES = ["추적", "자유", "태양계 전체"];
+const view = [{ th: 0, ph: 0, d: 0 }, { th: 0.6, ph: 0.35, d: 22 }, { th: 0.2, ph: 0.75, d: 340 }];
+let dragging = false, lx = 0, ly = 0;
+addEventListener("pointerdown", e => { dragging = true; lx = e.clientX; ly = e.clientY; });
+addEventListener("pointerup", () => dragging = false);
+addEventListener("pointermove", e => {
+  if (!dragging) return;
+  const v = view[camMode]; v.th -= (e.clientX - lx) * 0.005; v.ph = clamp(v.ph + (e.clientY - ly) * 0.005, -1.45, 1.45);
+  lx = e.clientX; ly = e.clientY;
+});
+addEventListener("wheel", e => {
+  const v = view[camMode]; v.d = clamp(v.d * (1 + Math.sign(e.deltaY) * 0.1), camMode === 2 ? 80 : 6, camMode === 2 ? 1200 : 150);
+}, { passive: true });
+view[0].d = 16; view[0].ph = 0.3;
+let paused = false, timeScale = 1;
+addEventListener("keydown", e => {
+  const k = e.key.toLowerCase();
+  if (k === "c") camMode = (camMode + 1) % 3;
+  else if (k === "n") nextTarget();
+  else if (k === " ") { paused = !paused; e.preventDefault(); }
+  else if (k === "+" || k === "=") timeScale = Math.min(8, timeScale * 1.5);
+  else if (k === "-") timeScale = Math.max(0.125, timeScale / 1.5);
+});
+addEventListener("resize", () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+// ================================================================ 메인 루프
+const clock = new THREE.Clock();
+const camPos = new THREE.Vector3(), camLook = new THREE.Vector3(), tmpQ = new THREE.Quaternion(), dummy = new THREE.Object3D();
+const prevFwd = new THREE.Vector3(0, 0, 1); let bank = 0, simT = 0;
+const hud = { n: document.getElementById("tName"), d: document.getElementById("tDist"), s: document.getElementById("tSpd"), st: document.getElementById("tState"), c: document.getElementById("tCam") };
+
+function updatePlanets(dt) {
+  planets.forEach(p => {
+    p.angle += p.w * dt;
+    p.grp.position.set(Math.cos(p.angle) * p.r, 0, Math.sin(p.angle) * p.r);
+    p.pos.copy(p.grp.position);
+    p.mesh.rotation.y += p.spin * dt;
+    if (p.clouds) p.clouds.rotation.y += (p.spin * 1.15) * dt;
+    if (p.moon) { p.moonA += 0.5 * dt; p.moon.position.set(Math.cos(p.moonA) * 5.2, Math.sin(p.moonA * 0.7) * 0.5, Math.sin(p.moonA) * 5.2); }
+  });
+  belt.rotation.y += 0.004 * dt;
+}
+
+function updateShip(dt) {
+  const p = planets[target];
+  const prev = tmpA.copy(ship.position);
+  if (state === "travel") {
+    // 목표 지점: 행성에서 태양 반대편 + 궤도 반경
+    const out = tmpB.copy(p.pos).normalize();
+    const goal = tmpC.copy(p.pos).addScaledVector(out, orbitRadius(p));
+    const to = goal.clone().sub(ship.position), dist = to.length();
+    let speed = Math.min(dist > 90 ? 46 : 30, 2 + dist * 0.9);
+    const desired = to.normalize().multiplyScalar(speed);
+    // 회피: 태양과 모든 행성
+    const avoid = (c, R) => { const d = ship.position.clone().sub(c), l = d.length(), lim = R * 1.9 + 6; if (l < lim && !(c === p.pos && dist < 30)) desired.addScaledVector(d.normalize(), (lim - l) * 3); };
+    avoid(new THREE.Vector3(), SUN_R * 1.4 + 8);
+    planets.forEach(q => { if (q !== p) avoid(q.pos, q.R); });
+    vel.lerp(desired, 1 - Math.exp(-dt * 1.3));
+    ship.position.addScaledVector(vel, dt);
+    if (ship.position.distanceTo(p.pos) < orbitRadius(p) + 6 && vel.length() < 16) {
+      state = "orbit"; orbitT = 0;
+      orbitOff.copy(ship.position).sub(p.pos);
+    }
+  } else {
+    orbitT += dt;
+    const R = orbitRadius(p);
+    orbitOff.setLength(mix(orbitOff.length(), R, 1 - Math.exp(-dt * 1.2)));
+    orbitOff.applyAxisAngle(orbitAxis, (0.42 / Math.max(1, R / 12)) * dt * 2.2);
+    ship.position.copy(p.pos).add(orbitOff);
+    vel.copy(ship.position).sub(prev).divideScalar(Math.max(dt, 1e-4));
+    if (orbitT > 11) nextTarget();
+  }
+  // 자세
+  const fwd = tmpB.copy(vel); if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, 1); fwd.normalize();
+  dummy.position.copy(ship.position); dummy.lookAt(ship.position.clone().add(fwd)); tmpQ.copy(dummy.quaternion);
+  ship.quaternion.slerp(tmpQ, 1 - Math.exp(-dt * 4));
+  const turn = prevFwd.clone().cross(fwd).y / Math.max(dt, 1e-4);
+  bank += (clamp(-turn * 1.4, -0.9, 0.9) - bank) * (1 - Math.exp(-dt * 3));
+  shipBody.rotation.z = bank; prevFwd.copy(fwd);
+  // 엔진 출력
+  const sp = vel.length(), pw = clamp(sp / 30, 0.25, 1.6);
+  engineGlows.forEach((g, i) => { const s = (0.7 + pw * 0.9) * (1 + Math.sin(simT * 40 + i) * 0.08); g.scale.set(s, s, 1); });
+  engineLight.intensity = 0.8 + pw * 1.6;
+  // 항적
+  trailPos.copyWithin(3, 0, (TRAIL - 1) * 3);
+  const eng = ship.localToWorld(tmpC.set(0, 0, -2.2));
+  trailPos[0] = eng.x; trailPos[1] = eng.y; trailPos[2] = eng.z;
+  trailGeo.attributes.position.needsUpdate = true;
+}
+
+function updateCamera(dt) {
+  const v = view[camMode];
+  if (camMode === 0) {
+    const fwd = tmpB.copy(vel).normalize(); if (!isFinite(fwd.x)) fwd.set(0, 0, 1);
+    const side = new THREE.Vector3().crossVectors(fwd, new THREE.Vector3(0, 1, 0)).normalize();
+    const up = new THREE.Vector3().crossVectors(side, fwd).normalize();
+    const off = fwd.clone().multiplyScalar(-Math.cos(v.ph) * v.d).addScaledVector(up, Math.sin(v.ph) * v.d + 1.5).addScaledVector(side, Math.sin(v.th) * v.d * 0.6);
+    camPos.copy(ship.position).add(off);
+    camLook.copy(ship.position).addScaledVector(fwd, 12);
+    const k = 1 - Math.exp(-dt * 3.5);
+    camera.position.lerp(camPos, k);
+    const cur = camera.userData.look || (camera.userData.look = camLook.clone());
+    cur.lerp(camLook, 1 - Math.exp(-dt * 5)); camera.lookAt(cur);
+  } else {
+    const c = camMode === 1 ? ship.position : new THREE.Vector3(0, 0, 0);
+    const off = new THREE.Vector3(Math.sin(v.th) * Math.cos(v.ph), Math.sin(v.ph), Math.cos(v.th) * Math.cos(v.ph)).multiplyScalar(v.d);
+    camPos.copy(c).add(off);
+    camera.position.lerp(camPos, 1 - Math.exp(-dt * 6));
+    const cur = camera.userData.look || (camera.userData.look = c.clone());
+    cur.lerp(c, 1 - Math.exp(-dt * 6)); camera.lookAt(cur);
+  }
+}
+
+const proj = new THREE.Vector3();
+function updateLabels() {
+  planets.forEach((p, i) => {
+    proj.copy(p.pos); proj.y += p.R * 1.5 + 1.2; proj.project(camera);
+    const vis = proj.z < 1 && proj.z > -1 && Math.abs(proj.x) < 1.1 && Math.abs(proj.y) < 1.1;
+    p.el.style.display = vis ? "block" : "none";
+    if (vis) p.el.style.transform = `translate(${(proj.x * 0.5 + 0.5) * innerWidth}px,${(-proj.y * 0.5 + 0.5) * innerHeight}px) translate(-50%,-100%)`;
+    p.el.classList.toggle("on", i === target);
+  });
+}
+
+function loop() {
+  requestAnimationFrame(loop);
+  let dt = Math.min(clock.getDelta(), 0.05);
+  if (!paused) {
+    dt *= timeScale; simT += dt;
+    sunMat.uniforms.t.value = simT;
+    updatePlanets(dt); updateShip(dt);
+  }
+  updateCamera(Math.min(clock.elapsedTime ? 0.016 : 0.016, 0.05));
+  updateLabels();
+  const p = planets[target], dist = Math.max(0, ship.position.distanceTo(p.pos) - p.R);
+  hud.n.textContent = p.kr; hud.d.textContent = dist.toFixed(1) + " AU-u"; hud.s.textContent = (vel.length() * 1000).toFixed(0) + " km/s";
+  hud.st.textContent = state === "travel" ? "항행 중" : "궤도 선회 중"; hud.c.textContent = CAM_NAMES[camMode] + (paused ? " · 일시정지" : "") + (timeScale !== 1 ? ` · x${timeScale.toFixed(2)}` : "");
+  renderer.render(scene, camera);
+}
+updatePlanets(0.01);
+ship.position.copy(earth.pos).add(new THREE.Vector3(14, 3, 10));
+camera.position.copy(ship.position).add(new THREE.Vector3(0, 6, -16));
+loop();
+const ld = document.getElementById("load"); ld.style.opacity = 0; setTimeout(() => ld.remove(), 900);
+</script>
+</body>
+</html>
